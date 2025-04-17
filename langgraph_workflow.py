@@ -1,75 +1,47 @@
 import os
-
 import subprocess
-
 import tempfile
-
 import traceback
-
 from typing import TypedDict, Optional
-
 from docx import Document
-
 from langgraph.graph import StateGraph, END
-
 from langchain_groq import ChatGroq
-
-from app.services.database import SessionLocal, CodeLog  # Import database
-
+from services.database import SessionLocal, CodeLog  # Import database
 from langchain_core.runnables import Runnable
 
 # === Initialize LLM ===
 
 llm = ChatGroq(
-
     model_name="llama3-8b-8192",
-
     temperature=0.2,
-
     groq_api_key=os.getenv("GROQ_API_KEY")
-
 )
 
 # === Shared State ===
 
 class CodeState(TypedDict):
-
     srs_path: Optional[str]
-
     srs_content: Optional[str]
-
     extracted_info: Optional[dict]
-
     generated_code: Optional[dict]
-
-    generated_tests: Optional[str]  # <- NEW
-
+    generated_tests: Optional[str] 
     test_results: Optional[str]
-
     debug_logs: Optional[str]
+
 
 # === Parser Node ===
 
 def parse_srs_node(state: CodeState) -> CodeState:
-
     print("[ParseSRS] Extracting content from SRS document...")
-
     path = state.get("srs_path")
-
     if not path:
-
         raise ValueError("Missing SRS path")
 
     doc = Document(path)
-
     content = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
-
     state["srs_content"] = content
-
     state["extracted_info"] = {
-
         "raw": f"Mock Extracted Functional Requirements:\n{content[:500]}"
-
     }
 
     return state
@@ -77,15 +49,10 @@ def parse_srs_node(state: CodeState) -> CodeState:
 # === CodeGen Node ===
 
 def codegen_node(state: CodeState) -> CodeState:
-
     print("[CodeGen] Generating FastAPI backend code...")
-
     extracted = state.get("extracted_info", {}).get("raw", "")
-
     if not extracted:
-
         raise ValueError("No extracted info found for code generation!")
-
     prompt = f"""
 
 You are a senior FastAPI engineer.
@@ -111,23 +78,17 @@ Use clean modular structure and include comments.
     """
 
     response = llm.invoke(prompt)
-
     state["generated_code"] = {"raw": response.content}
-
     return state
+
 
 # === TestGen Node ===
 
 def testgen_node(state: CodeState) -> CodeState:
-
     print("[TestGen] Generating unit tests using pytest...")
-
     code = state.get("generated_code", {}).get("raw", "")
-
     if not code:
-
         raise ValueError("Code not available for testing")
-
     prompt = f"""
 
 You are a Python test engineer.
@@ -151,9 +112,7 @@ Code:
     """
 
     response = llm.invoke(prompt)
-
     state["generated_tests"] = response.content
-
     return state
 
 # === Code Execution and Debug Log Node ===
@@ -161,23 +120,15 @@ Code:
 def execute_and_debug_node(state: CodeState) -> CodeState:
 
     print("[Execution] Running generated code and unit tests...")
-
     code = state.get("generated_code", {}).get("raw", "")
-
     tests = state.get("generated_tests", "")
-
     with tempfile.TemporaryDirectory() as temp_dir:
-
         main_path = os.path.join(temp_dir, "main.py")
-
         test_path = os.path.join(temp_dir, "test_main.py")
-
         with open(main_path, "w", encoding="utf-8") as f:
-
             f.write(code)
 
         with open(test_path, "w", encoding="utf-8") as f:
-
             f.write(tests)
 
         # Run pytest
@@ -185,29 +136,20 @@ def execute_and_debug_node(state: CodeState) -> CodeState:
         try:
 
             result = subprocess.run(
-
                 ["pytest", "--tb=short", test_path],
-
                 cwd=temp_dir,
-
                 capture_output=True,
-
                 text=True,
-
                 timeout=30
-
             )
 
             passed = result.returncode == 0
-
             output = result.stdout + "\n" + result.stderr
 
             state["test_results"] = output
 
             if not passed:
-
                 print("[Debugging] Tests failed. Invoking LLM for fix...")
-
                 fix_prompt = f"""
 
 You wrote this code:
@@ -227,41 +169,28 @@ Please fix the code and provide an updated version of main.py that passes all te
 """
 
                 fix_response = llm.invoke(fix_prompt)
-
                 state["generated_code"]["raw"] = fix_response.content
-
                 state["debug_logs"] = output
 
             else:
-
                 print("[Execution] All tests passed.")
 
         except Exception as e:
-
             state["test_results"] = "Execution error."
-
             state["debug_logs"] = traceback.format_exc()
 
         # Save to DB
 
         db = SessionLocal()
-
         log = CodeLog(
-
             entity="User",  # Set entity to "User" or dynamically from state["extracted_info"]
-
             code=state["generated_code"]["raw"],
-
             test=state["generated_tests"],
-
             debug_log=state["debug_logs"]
-
         )
 
         db.add(log)
-
         db.commit()
-
         db.close()
 
     return state
@@ -272,43 +201,29 @@ Please fix the code and provide an updated version of main.py that passes all te
 from models.persistence import SessionLocal, GenerationLog  # Add this import
 
 def persist_to_db_node(state: CodeState) -> CodeState:
-
     print("[Persist] Saving generated content to PostgreSQL...")
-
     session = SessionLocal()
 
     try:
-
         entry = GenerationLog(
-
             srs_content=state.get("srs_content", ""),
-
             extracted_info=state.get("extracted_info", {}).get("raw", ""),
-
             generated_code=state.get("generated_code", {}).get("raw", ""),
-
             generated_tests=state.get("generated_tests", ""),
-
             test_results=state.get("test_results", ""),
-
             debug_logs=state.get("debug_logs", "")
-
         )
 
         session.add(entry)
-
         session.commit()
 
         print("[Persist] Saved successfully.")
 
     except Exception as e:
-
         session.rollback()
-
         print(f"[Persist] Error while saving: {e}")
 
     finally:
-
         session.close()
 
     return state 

@@ -1,4 +1,4 @@
-from app.services.database import init_db, create_database_if_not_exists
+from services.database import init_db, create_database_if_not_exists
 
 # Run everything in DB
 
