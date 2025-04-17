@@ -266,6 +266,53 @@ Please fix the code and provide an updated version of main.py that passes all te
 
     return state
 
+
+# === Persistance Node === 
+
+from models.persistence import SessionLocal, GenerationLog  # Add this import
+
+def persist_to_db_node(state: CodeState) -> CodeState:
+
+    print("[Persist] Saving generated content to PostgreSQL...")
+
+    session = SessionLocal()
+
+    try:
+
+        entry = GenerationLog(
+
+            srs_content=state.get("srs_content", ""),
+
+            extracted_info=state.get("extracted_info", {}).get("raw", ""),
+
+            generated_code=state.get("generated_code", {}).get("raw", ""),
+
+            generated_tests=state.get("generated_tests", ""),
+
+            test_results=state.get("test_results", ""),
+
+            debug_logs=state.get("debug_logs", "")
+
+        )
+
+        session.add(entry)
+
+        session.commit()
+
+        print("[Persist] Saved successfully.")
+
+    except Exception as e:
+
+        session.rollback()
+
+        print(f"[Persist] Error while saving: {e}")
+
+    finally:
+
+        session.close()
+
+    return state 
+
 # === Build LangGraph Workflow ===
 
 def build_langgraph() -> Runnable:
@@ -288,6 +335,10 @@ def build_langgraph() -> Runnable:
 
     builder.add_edge("TestGen", "ExecuteDebug")
 
-    builder.add_edge("ExecuteDebug", END)
-
+    builder.add_node("Persist", persist_to_db_node)
+    
+    builder.add_edge("ExecuteDebug", "Persist")
+    
+    builder.add_edge("Persist", END)
+    
     return builder.compile() 
