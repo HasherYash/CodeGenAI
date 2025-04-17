@@ -12,9 +12,11 @@ from docx import Document
 
 from langgraph.graph import StateGraph, END
 
-from langchain_core.runnables import Runnable
-
 from langchain_groq import ChatGroq
+
+from app.services.database import SessionLocal, CodeLog  # Import database
+
+from langchain_core.runnables import Runnable
 
 # === Initialize LLM ===
 
@@ -46,7 +48,6 @@ class CodeState(TypedDict):
 
     debug_logs: Optional[str]
 
-
 # === Parser Node ===
 
 def parse_srs_node(state: CodeState) -> CodeState:
@@ -72,7 +73,6 @@ def parse_srs_node(state: CodeState) -> CodeState:
     }
 
     return state
-
 
 # === CodeGen Node ===
 
@@ -115,7 +115,6 @@ Use clean modular structure and include comments.
     state["generated_code"] = {"raw": response.content}
 
     return state
-
 
 # === TestGen Node ===
 
@@ -160,50 +159,112 @@ Code:
 # === Code Execution and Debug Log Node ===
 
 def execute_and_debug_node(state: CodeState) -> CodeState:
-   print("[Execution] Running generated code and unit tests...")
-   code = state.get("generated_code", {}).get("raw", "")
-   tests = state.get("generated_tests", "")
-   with tempfile.TemporaryDirectory() as temp_dir:
-       main_path = os.path.join(temp_dir, "main.py")
-       test_path = os.path.join(temp_dir, "test_main.py")
-       with open(main_path, "w", encoding="utf-8") as f:
-           f.write(code)
-       with open(test_path, "w", encoding="utf-8") as f:
-           f.write(tests)
-       # Run pytest
-       try:
-           result = subprocess.run(
-               ["pytest", "--tb=short", test_path],
-               cwd=temp_dir,
-               capture_output=True,
-               text=True,
-               timeout=30
-           )
-           passed = result.returncode == 0
-           output = result.stdout + "\n" + result.stderr
-           state["test_results"] = output
-           if not passed:
-               print("[Debugging] Tests failed. Invoking LLM for fix...")
-               # Ask LLM to fix the code based on the test output
-               fix_prompt = f"""
-You wrote this code:
-{code}
-And these were the tests:
-{tests}
-The following test output indicates errors:
-{output}
-Please fix the code and provide an updated version of main.py that passes all tests.
-"""
-               fix_response = llm.invoke(fix_prompt)
-               state["generated_code"]["raw"] = fix_response.content
-               state["debug_logs"] = output
-           else:
-               print("[Execution] All tests passed.")
-       except Exception as e:
-           state["test_results"] = "Execution error."
-           state["debug_logs"] = traceback.format_exc()
-   return state
 
+    print("[Execution] Running generated code and unit tests...")
+
+    code = state.get("generated_code", {}).get("raw", "")
+
+    tests = state.get("generated_tests", "")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+
+        main_path = os.path.join(temp_dir, "main.py")
+
+        test_path = os.path.join(temp_dir, "test_main.py")
+
+        with open(main_path, "w", encoding="utf-8") as f:
+
+            f.write(code)
+
+        with open(test_path, "w", encoding="utf-8") as f:
+
+            f.write(tests)
+
+        # Run pytest
+
+        try:
+
+            result = subprocess.run(
+
+                ["pytest", "--tb=short", test_path],
+
+                cwd=temp_dir,
+
+                capture_output=True,
+
+                text=True,
+
+                timeout=30
+
+            )
+
+            passed = result.returncode == 0
+
+            output = result.stdout + "\n" + result.stderr
+
+            state["test_results"] = output
+
+            if not passed:
+
+                print("[Debugging] Tests failed. Invoking LLM for fix...")
+
+                fix_prompt = f"""
+
+You wrote this code:
+
+{code}
+
+And these were the tests:
+
+{tests}
+
+The following test output indicates errors:
+
+{output}
+
+Please fix the code and provide an updated version of main.py that passes all tests.
+
+"""
+
+                fix_response = llm.invoke(fix_prompt)
+
+                state["generated_code"]["raw"] = fix_response.content
+
+                state["debug_logs"] = output
+
+            else:
+
+                print("[Execution] All tests passed.")
+
+        except Exception as e:
+
+            state["test_results"] = "Execution error."
+
+            state["debug_logs"] = traceback.format_exc()
+
+        # Save to DB
+
+        db = SessionLocal()
+
+        log = CodeLog(
+
+            entity="User",  # Set entity to "User" or dynamically from state["extracted_info"]
+
+            code=state["generated_code"]["raw"],
+
+            test=state["generated_tests"],
+
+            debug_log=state["debug_logs"]
+
+        )
+
+        db.add(log)
+
+        db.commit()
+
+        db.close()
+
+    return state
 
 # === Build LangGraph Workflow ===
 
