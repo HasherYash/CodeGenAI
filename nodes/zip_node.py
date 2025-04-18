@@ -1,6 +1,7 @@
 import os
 import zipfile
 from langgraph_workflow import traceable, CodeState
+from nodes.project_structure import file_name
 
 @traceable(name="ZipProject")
 def zip_node(state: CodeState) -> CodeState:
@@ -14,7 +15,7 @@ def zip_node(state: CodeState) -> CodeState:
     os.makedirs(output_dir, exist_ok=True)
 
     # Define zip file name
-    zip_name = f"{state.get('project_name', 'fastapi_project')}.zip"
+    zip_name = f"{file_name}.zip"
     zip_path = os.path.join(output_dir, zip_name)
 
     # Create zip archive
