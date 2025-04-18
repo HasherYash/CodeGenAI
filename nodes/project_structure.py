@@ -8,7 +8,7 @@ def prepare_project_structure_node(state: CodeState) -> CodeState:
     """Create the full project directory and subdirectories as per parsed SRS structure."""
 
     # Create a unique base project folder
-    base_dir = os.path.join("/tmp", f"project_{uuid.uuid4()}")
+    base_dir = os.path.join("generated_code", f"project_{uuid.uuid4()}")
     os.makedirs(base_dir, exist_ok=True)
 
     # Extract structured file info from state (provided by LLM in ParseSRS)

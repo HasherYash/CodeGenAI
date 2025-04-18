@@ -15,3 +15,5 @@ def run_codegen_workflow(srs_path: str, output_dir: str):
    os.makedirs(output_dir, exist_ok=True)
    with open(os.path.join(output_dir, "main.py"), "w") as f:
        f.write(generated_code)
+    
+   return final_state    
