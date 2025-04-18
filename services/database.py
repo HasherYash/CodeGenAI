@@ -62,6 +62,7 @@ class CodeLog(Base):
     code = Column(Text)
     test = Column(Text)
     debug_log = Column(Text)
+    zip_path = Column(String)
 
 # Step 3: Initialize the database (create tables)
 

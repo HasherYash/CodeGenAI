@@ -1,15 +1,33 @@
 import os
-import subprocess
-import tempfile
-import traceback
-from typing import TypedDict, Optional
-from docx import Document
+import logging
+import functools
+from typing import TypedDict, Optional, Dict
 from langgraph.graph import StateGraph, END
 from langchain_groq import ChatGroq
-from services.database import SessionLocal, CodeLog  # Import database
 from langchain_core.runnables import Runnable
 
-# === Initialize LLM ===
+# ===== Logging Setup =====
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ===== Traceable Decorator =====
+def traceable(name: str):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            logger.info(f"Entering {name}")
+            result = func(*args, **kwargs)
+            logger.info(f"Exiting {name}")
+            return result
+        return wrapper
+    return decorator
+
+# ===== Environment Variables for LLM =====
+os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY")
+os.environ["LANGCHAIN_PROJECT"] = os.getenv("LANGCHAIN_PROJECT", "FastAPI-Generator")
+os.environ["LANGCHAIN_TRACING_V2"] = "true"
+
+# ===== Initialize Shared LLM =====
 
 llm = ChatGroq(
     model_name="llama3-8b-8192",
@@ -17,243 +35,69 @@ llm = ChatGroq(
     groq_api_key=os.getenv("GROQ_API_KEY")
 )
 
-# === Shared State ===
+# ===== Define Shared State Structure =====
 
 class CodeState(TypedDict):
     srs_path: Optional[str]
     srs_content: Optional[str]
-    extracted_info: Optional[dict]
-    generated_code: Optional[dict]
-    generated_tests: Optional[str] 
+    extracted_info: Optional[Dict]
+    project_dir: Optional[str]
+    generated_code: Optional[Dict]
+    generated_tests: Optional[str]
     test_results: Optional[str]
     debug_logs: Optional[str]
-
-
-# === Parser Node ===
-
-def parse_srs_node(state: CodeState) -> CodeState:
-    print("[ParseSRS] Extracting content from SRS document...")
-    path = state.get("srs_path")
-    if not path:
-        raise ValueError("Missing SRS path")
-
-    doc = Document(path)
-    content = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
-    state["srs_content"] = content
-    state["extracted_info"] = {
-        "raw": f"Mock Extracted Functional Requirements:\n{content[:500]}"
-    }
-
-    return state
-
-# === CodeGen Node ===
-
-def codegen_node(state: CodeState) -> CodeState:
-    print("[CodeGen] Generating FastAPI backend code...")
-    extracted = state.get("extracted_info", {}).get("raw", "")
-    if not extracted:
-        raise ValueError("No extracted info found for code generation!")
-    prompt = f"""
-
-You are a senior FastAPI engineer.
-
-Generate Python backend code based on the following software requirements:
-
-{extracted}
-
-Include:
-
-1. Pydantic models (User, Item)
-
-2. API routes (/users, /items)
-
-3. Services (logic)
-
-4. main.py
-
-5. Logging & error handling
-
-Use clean modular structure and include comments.
-
-    """
-
-    response = llm.invoke(prompt)
-    state["generated_code"] = {"raw": response.content}
-    return state
-
-
-# === TestGen Node ===
-
-def testgen_node(state: CodeState) -> CodeState:
-    print("[TestGen] Generating unit tests using pytest...")
-    code = state.get("generated_code", {}).get("raw", "")
-    if not code:
-        raise ValueError("Code not available for testing")
-    prompt = f"""
-
-You are a Python test engineer.
-
-Write pytest-based unit tests for the following FastAPI backend code.
-
-Include:
-
-- Route tests
-
-- Model tests
-
-- Service tests
-
-- Edge cases
-
-Code:
-
-{code}
-
-    """
-
-    response = llm.invoke(prompt)
-    state["generated_tests"] = response.content
-    return state
-
-# === Code Execution and Debug Log Node ===
-
-def execute_and_debug_node(state: CodeState) -> CodeState:
-
-    print("[Execution] Running generated code and unit tests...")
-    code = state.get("generated_code", {}).get("raw", "")
-    tests = state.get("generated_tests", "")
-    with tempfile.TemporaryDirectory() as temp_dir:
-        main_path = os.path.join(temp_dir, "main.py")
-        test_path = os.path.join(temp_dir, "test_main.py")
-        with open(main_path, "w", encoding="utf-8") as f:
-            f.write(code)
-
-        with open(test_path, "w", encoding="utf-8") as f:
-            f.write(tests)
-
-        # Run pytest
-
-        try:
-
-            result = subprocess.run(
-                ["pytest", "--tb=short", test_path],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-
-            passed = result.returncode == 0
-            output = result.stdout + "\n" + result.stderr
-
-            state["test_results"] = output
-
-            if not passed:
-                print("[Debugging] Tests failed. Invoking LLM for fix...")
-                fix_prompt = f"""
-
-You wrote this code:
-
-{code}
-
-And these were the tests:
-
-{tests}
-
-The following test output indicates errors:
-
-{output}
-
-Please fix the code and provide an updated version of main.py that passes all tests.
-
-"""
-
-                fix_response = llm.invoke(fix_prompt)
-                state["generated_code"]["raw"] = fix_response.content
-                state["debug_logs"] = output
-
-            else:
-                print("[Execution] All tests passed.")
-
-        except Exception as e:
-            state["test_results"] = "Execution error."
-            state["debug_logs"] = traceback.format_exc()
-
-        # Save to DB
-
-        db = SessionLocal()
-        log = CodeLog(
-            entity="User",  # Set entity to "User" or dynamically from state["extracted_info"]
-            code=state["generated_code"]["raw"],
-            test=state["generated_tests"],
-            debug_log=state["debug_logs"]
-        )
-
-        db.add(log)
-        db.commit()
-        db.close()
-
-    return state
-
-
-# === Persistance Node === 
-
-from models.persistence import SessionLocal, GenerationLog  # Add this import
-
-def persist_to_db_node(state: CodeState) -> CodeState:
-    print("[Persist] Saving generated content to PostgreSQL...")
-    session = SessionLocal()
-
-    try:
-        entry = GenerationLog(
-            srs_content=state.get("srs_content", ""),
-            extracted_info=state.get("extracted_info", {}).get("raw", ""),
-            generated_code=state.get("generated_code", {}).get("raw", ""),
-            generated_tests=state.get("generated_tests", ""),
-            test_results=state.get("test_results", ""),
-            debug_logs=state.get("debug_logs", "")
-        )
-
-        session.add(entry)
-        session.commit()
-
-        print("[Persist] Saved successfully.")
-
-    except Exception as e:
-        session.rollback()
-        print(f"[Persist] Error while saving: {e}")
-
-    finally:
-        session.close()
-
-    return state 
-
-# === Build LangGraph Workflow ===
+    zip_path: Optional[str]
+    docs: Optional[Dict]
+    project_structure: Optional[Dict]
+
+
+# ===== Import Nodes =====
+
+from nodes.parser_node import parse_srs_node
+from nodes.project_structure import prepare_project_structure_node
+from nodes.code_gen_node import codegen_node
+from nodes.test_gen_node import testgen_node
+from nodes.execute_and_debug_node import execute_and_debug_node
+from nodes.generate_docs_node import generate_docs_node
+from nodes.persist_to_db_node import persist_to_db_node
+from nodes.zip_node import zip_node
+
+# ===== Build LangGraph =====
 
 def build_langgraph() -> Runnable:
 
     builder = StateGraph(CodeState)
 
+    # Register nodes
     builder.add_node("ParseSRS", parse_srs_node)
-
+    builder.add_node("PrepareProject", prepare_project_structure_node)
     builder.add_node("CodeGen", codegen_node)
-
     builder.add_node("TestGen", testgen_node)
+    builder.add_node("ExecuteDebug", execute_and_debug_node)
+    builder.add_node("GenerateDocs", generate_docs_node)
+    builder.add_node("Persist", persist_to_db_node)
+    builder.add_node("ZipProject", zip_node)
 
-    builder.add_node("ExecuteDebug", execute_and_debug_node)  # NEW
+    # Define execution order
 
     builder.set_entry_point("ParseSRS")
-
-    builder.add_edge("ParseSRS", "CodeGen")
-
+    builder.add_edge("ParseSRS", "PrepareProject")
+    builder.add_edge("PrepareProject", "CodeGen")
     builder.add_edge("CodeGen", "TestGen")
-
     builder.add_edge("TestGen", "ExecuteDebug")
+    builder.add_conditional_edges(
+        "ExecuteDebug",
+        lambda state: "Fixing" if state.get("test_results") and "FAILED" in state["test_results"] else "Done",
+        {
+            "Fixing": "CodeGen",
+            "Done": "GenerateDocs"
+        }
+    )
 
-    builder.add_node("Persist", persist_to_db_node)
-    
-    builder.add_edge("ExecuteDebug", "Persist")
-    
-    builder.add_edge("Persist", END)
-    
-    return builder.compile() 
+    builder.add_edge("GenerateDocs", "Persist")
+    builder.add_edge("Persist", "ZipProject")
+    builder.add_edge("ZipProject", END)
+    return builder.compile()
+
+# ===== Exports for Other Node Files =====
+__all__ = ["llm", "traceable", "CodeState"] 
